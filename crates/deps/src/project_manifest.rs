@@ -237,19 +237,21 @@ pub fn check_go_replacements_allowing(
     Ok(())
 }
 
-pub fn go_cache_version(
-    version: &str,
-    replacement: Option<&GoReplacement>,
+pub fn go_replacement_cache_key(
+    replacement: &GoReplacement,
     project_root: Option<&Path>,
 ) -> String {
-    let Some(replacement) = replacement else {
+    format!(
+        "{:016x}",
+        stable_hash(replacement.cache_fingerprint(project_root).as_bytes())
+    )
+}
+
+pub fn go_cache_version(version: &str, replacement_cache_key: Option<&str>) -> String {
+    let Some(replacement_cache_key) = replacement_cache_key else {
         return version.to_string();
     };
-    format!(
-        "{}+replace.{}",
-        version,
-        sanitize_cache_segment(&replacement.cache_fingerprint(project_root))
-    )
+    format!("{}+replace.{}", version, replacement_cache_key)
 }
 
 fn path_replacement_fingerprint(path: &str, project_root: Option<&Path>) -> String {
@@ -319,19 +321,6 @@ fn stable_hash(bytes: &[u8]) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     hasher.write(bytes);
     hasher.finish()
-}
-
-fn sanitize_cache_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];

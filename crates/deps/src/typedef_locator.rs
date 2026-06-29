@@ -7,7 +7,8 @@ use stdlib::Target;
 
 use crate::project_manifest::{
     GoDependency, GoReplacement, Manifest, check_go_replacements, check_no_subpackage_deps,
-    check_toolchain_version, find_module_for_pkg, go_cache_version, parse_manifest,
+    check_toolchain_version, find_module_for_pkg, go_cache_version, go_replacement_cache_key,
+    parse_manifest,
 };
 use crate::{GoModule, GoPackage, typedef_cache_dir};
 
@@ -111,6 +112,7 @@ pub trait BindgenSetup: Send + Sync {
 pub struct TypedefLocator {
     deps: BTreeMap<String, GoDependency>,
     replacements: BTreeMap<String, GoReplacement>,
+    replacement_cache_keys: BTreeMap<String, String>,
     project_root: Option<PathBuf>,
     target: Target,
     bindgen: Option<Arc<dyn Bindgen>>,
@@ -131,9 +133,20 @@ impl TypedefLocator {
         project_root: Option<PathBuf>,
         target: Target,
     ) -> Self {
+        let replacement_cache_keys = replacements
+            .iter()
+            .map(|(module, replacement)| {
+                (
+                    module.clone(),
+                    go_replacement_cache_key(replacement, project_root.as_deref()),
+                )
+            })
+            .collect();
+
         Self {
             deps,
             replacements,
+            replacement_cache_keys,
             project_root,
             target,
             bindgen: None,
@@ -233,8 +246,9 @@ impl TypedefLocator {
     fn cache_version(&self, module_path: &str, dep: &GoDependency) -> String {
         go_cache_version(
             &dep.version,
-            self.replacements.get(module_path),
-            self.project_root.as_deref(),
+            self.replacement_cache_keys
+                .get(module_path)
+                .map(String::as_str),
         )
     }
 

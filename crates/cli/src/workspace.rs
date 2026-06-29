@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 
 use deps::{
     Bindgen, BindgenFailure, BindgenSession, BindgenSetup, GoModule, GoPackage, GoReplacement,
-    TypedefLocator,
+    TypedefLocator, go_replacement_cache_key,
 };
 use serde::Deserialize;
 use syntax::ast::{Expression, ImportAlias};
@@ -58,8 +58,7 @@ pub struct GoWorkspace<'a> {
     /// The typedef cache root, e.g. `<project>/target/.lisette/typedefs/lis@v0.1.7`.
     pub typedef_cache_dir: &'a Path,
     target: stdlib::Target,
-    project_root: Option<PathBuf>,
-    replacements: BTreeMap<String, GoReplacement>,
+    replacement_cache_keys: BTreeMap<String, String>,
 }
 
 impl<'a> GoWorkspace<'a> {
@@ -74,20 +73,30 @@ impl<'a> GoWorkspace<'a> {
         project_root: Option<PathBuf>,
         replacements: BTreeMap<String, GoReplacement>,
     ) -> Self {
+        let replacement_cache_keys = replacements
+            .iter()
+            .map(|(module, replacement)| {
+                (
+                    module.clone(),
+                    go_replacement_cache_key(replacement, project_root.as_deref()),
+                )
+            })
+            .collect();
+
         Self {
             root,
             typedef_cache_dir,
             target,
-            project_root,
-            replacements,
+            replacement_cache_keys,
         }
     }
 
     pub fn cache_version_for(&self, module_path: &str, version: &str) -> String {
         deps::go_cache_version(
             version,
-            self.replacements.get(module_path),
-            self.project_root.as_deref(),
+            self.replacement_cache_keys
+                .get(module_path)
+                .map(String::as_str),
         )
     }
 
