@@ -190,10 +190,21 @@ pub fn check_no_subpackage_deps(manifest: &Manifest) -> Result<(), String> {
 }
 
 pub fn check_go_replacements(manifest: &Manifest) -> Result<(), String> {
+    check_go_replacements_allowing(manifest, &[])
+}
+
+pub fn check_go_replacements_allowing(
+    manifest: &Manifest,
+    allowed_missing_deps: &[&str],
+) -> Result<(), String> {
     let deps = manifest.go_deps();
 
     for (module_path, replacement) in &manifest.replacements.go {
-        if !deps.contains_key(module_path) {
+        if !deps.contains_key(module_path)
+            && !allowed_missing_deps
+                .iter()
+                .any(|allowed| *allowed == module_path)
+        {
             return Err(format!(
                 "`{}` in `[replace.go]` has no matching `[dependencies.go]` entry",
                 module_path
@@ -667,6 +678,25 @@ version = "0.1.0"
 
         let error = check_go_replacements(&manifest).unwrap_err();
         assert!(error.contains("has no matching `[dependencies.go]` entry"));
+    }
+
+    #[test]
+    fn can_allow_replacement_for_dependency_being_added() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/gorilla/mux" = "v1.8.0"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { path = "../dragonfly" }
+"#,
+        );
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        assert!(check_go_replacements_allowing(&manifest, &["github.com/df-mc/dragonfly"]).is_ok());
     }
 
     #[test]

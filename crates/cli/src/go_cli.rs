@@ -155,7 +155,11 @@ pub fn write_go_mod(dir: &Path, module_name: &str, locator: &TypedefLocator) -> 
     let mut replacements = Vec::new();
     for (module_path, replacement) in locator.replacements() {
         if let Some(path) = &replacement.path {
-            replacements.push(format!("\t{} => {}", module_path, path));
+            replacements.push(format!(
+                "\t{} => {}",
+                module_path,
+                replacement_path_for_go_mod(path, locator)
+            ));
             continue;
         }
         if let (Some(module), Some(version)) = (&replacement.module, &replacement.version) {
@@ -183,6 +187,17 @@ pub fn write_go_mod(dir: &Path, module_name: &str, locator: &TypedefLocator) -> 
     }
 
     Ok(())
+}
+
+fn replacement_path_for_go_mod(path: &str, locator: &TypedefLocator) -> String {
+    let replacement = Path::new(path);
+    if replacement.is_absolute() {
+        return path.to_string();
+    }
+    let Some(project_root) = locator.project_root() else {
+        return path.to_string();
+    };
+    project_root.join(replacement).display().to_string()
 }
 
 pub struct GoCliError {

@@ -407,7 +407,9 @@ fn setup_project(
         return Err(1);
     }
 
-    if let Err(msg) = deps::check_go_replacements(&manifest) {
+    if let Err(msg) =
+        deps::check_go_replacements_allowing(&manifest, &[parsed_dep.requested_package.as_str()])
+    {
         cli_error!(
             "Invalid `lisette.toml`",
             msg,

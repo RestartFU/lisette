@@ -385,6 +385,10 @@ For local development:
 "github.com/df-mc/dragonfly" = { path = "../dragonfly" }
 ```
 
+Relative `path` replacements are resolved from the directory containing
+`lisette.toml`, matching how dependency paths are normally written in project
+manifests.
+
 To import a third-party dependency:
 
 ```rs
