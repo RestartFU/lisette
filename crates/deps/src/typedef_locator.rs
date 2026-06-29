@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use stdlib::Target;
 
@@ -296,7 +297,14 @@ impl TypedefLocator {
         let cache_dir = typedef_cache_dir(project_root);
         let typedef_path = pkg.typedef_path(&cache_dir, self.target);
 
-        match read_typedef(&typedef_path) {
+        let read_outcome =
+            if self.local_replacement_typedef_stale(&module_path, package_path, &typedef_path) {
+                ReadOutcome::Missing
+            } else {
+                read_typedef(&typedef_path)
+            };
+
+        match read_outcome {
             ReadOutcome::Found(content) => TypedefLocatorResult::Found {
                 content: Cow::Owned(content),
                 origin: TypedefOrigin::Cache(typedef_path),
@@ -342,6 +350,59 @@ impl TypedefLocator {
             },
         }
     }
+
+    fn local_replacement_typedef_stale(
+        &self,
+        module_path: &str,
+        package_path: &str,
+        typedef_path: &Path,
+    ) -> bool {
+        let Some(replacement) = self.replacements.get(module_path) else {
+            return false;
+        };
+        let Some(path) = &replacement.path else {
+            return false;
+        };
+        let Some(package_rel) = package_path
+            .strip_prefix(module_path)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        else {
+            return false;
+        };
+
+        let root = crate::resolve_go_replacement_path(path, self.project_root.as_deref());
+        let package_dir = root.join(package_rel.trim_start_matches('/'));
+        let Some(package_mtime) = go_package_mtime_nanos(&package_dir) else {
+            return false;
+        };
+        let Some(typedef_mtime) = file_mtime_nanos(typedef_path) else {
+            return true;
+        };
+
+        package_mtime > typedef_mtime
+    }
+}
+
+fn go_package_mtime_nanos(package_dir: &Path) -> Option<u128> {
+    let entries = std::fs::read_dir(package_dir).ok()?;
+    let mut max = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("go") {
+            continue;
+        }
+        max = max.max(file_mtime_nanos(&path));
+    }
+    max
+}
+
+fn file_mtime_nanos(path: &Path) -> Option<u128> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_nanos(modified)
+}
+
+fn system_time_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_nanos())
 }
 
 enum ReadOutcome {

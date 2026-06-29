@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -263,20 +262,21 @@ pub fn go_cache_version(version: &str, replacement_cache_key: Option<&str>) -> S
 }
 
 fn path_replacement_fingerprint(path: &str, project_root: Option<&Path>) -> String {
-    let resolved = resolve_replacement_path(path, project_root);
+    let resolved = resolve_go_replacement_path(path, project_root);
     let display_path = resolved.display();
     let go_mod_hash = fs::read(resolved.join("go.mod"))
         .map(|bytes| stable_hash(&bytes))
         .map(|hash| format!("{hash:016x}"))
         .unwrap_or_else(|_| "missing".to_string());
-    let mtime = max_mtime_nanos(&resolved)
-        .map(|nanos| nanos.to_string())
-        .unwrap_or_else(|| "missing".to_string());
+    let go_sum_hash = fs::read(resolved.join("go.sum"))
+        .map(|bytes| stable_hash(&bytes))
+        .map(|hash| format!("{hash:016x}"))
+        .unwrap_or_else(|_| "missing".to_string());
 
-    format!("path:{path}:resolved:{display_path}:go_mod:{go_mod_hash}:mtime:{mtime}")
+    format!("path:{path}:resolved:{display_path}:go_mod:{go_mod_hash}:go_sum:{go_sum_hash}")
 }
 
-fn resolve_replacement_path(path: &str, project_root: Option<&Path>) -> PathBuf {
+pub fn resolve_go_replacement_path(path: &str, project_root: Option<&Path>) -> PathBuf {
     let path = Path::new(path);
     let resolved = if path.is_relative() {
         project_root.map_or_else(|| path.to_path_buf(), |root| root.join(path))
@@ -284,45 +284,6 @@ fn resolve_replacement_path(path: &str, project_root: Option<&Path>) -> PathBuf 
         path.to_path_buf()
     };
     resolved.canonicalize().unwrap_or(resolved)
-}
-
-fn max_mtime_nanos(path: &Path) -> Option<u128> {
-    let mut max = file_mtime_nanos(path);
-    if !path.is_dir() {
-        return max;
-    }
-
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| matches!(name, ".git" | "target"))
-            {
-                continue;
-            }
-            max = max.max(file_mtime_nanos(&path));
-            if path.is_dir() {
-                stack.push(path);
-            }
-        }
-    }
-
-    max
-}
-
-fn file_mtime_nanos(path: &Path) -> Option<u128> {
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    system_time_nanos(modified)
-}
-
-fn system_time_nanos(time: SystemTime) -> Option<u128> {
-    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_nanos())
 }
 
 fn stable_hash(bytes: &[u8]) -> u64 {
