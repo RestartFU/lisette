@@ -195,10 +195,11 @@ pub(crate) fn walk_typedef_cache(
         }
 
         let is_seed = seed_packages.contains(&(module_path.clone(), package_path.clone()));
+        let cache_version = workspace.cache_version_for(&module_path, &version);
         let module = GoModule {
             path: &module_path,
             version: &version,
-            cache_version: None,
+            cache_version: Some(&cache_version),
         };
 
         match workspace.reconcile_package(module, &package_path) {
@@ -314,10 +315,11 @@ pub(crate) fn rebuild_drifted_cache_entries(
         if current == &entry.version {
             continue;
         }
+        let cache_version = workspace.cache_version_for(&entry.module, current);
         let module = GoModule {
             path: &entry.module,
             version: current,
-            cache_version: None,
+            cache_version: Some(&cache_version),
         };
         match workspace.reconcile_package(module, &entry.package) {
             Ok(stubs) => warn_stubbed(&stubs),

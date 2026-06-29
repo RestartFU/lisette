@@ -203,7 +203,7 @@ pub fn check_go_replacements_allowing(
         if !deps.contains_key(module_path)
             && !allowed_missing_deps
                 .iter()
-                .any(|allowed| *allowed == module_path)
+                .any(|allowed| is_pkg_under(allowed, module_path))
         {
             return Err(format!(
                 "`{}` in `[replace.go]` has no matching `[dependencies.go]` entry",
@@ -233,6 +233,30 @@ pub fn check_go_replacements_allowing(
     }
 
     Ok(())
+}
+
+pub fn go_cache_version(version: &str, replacement: Option<&GoReplacement>) -> String {
+    let Some(replacement) = replacement else {
+        return version.to_string();
+    };
+    format!(
+        "{}+replace.{}",
+        version,
+        sanitize_cache_segment(&replacement.cache_fingerprint())
+    )
+}
+
+fn sanitize_cache_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -697,6 +721,25 @@ version = "0.1.0"
         let manifest = parse_manifest(dir.path()).unwrap();
 
         assert!(check_go_replacements_allowing(&manifest, &["github.com/df-mc/dragonfly"]).is_ok());
+    }
+
+    #[test]
+    fn can_allow_replacement_for_parent_module_being_added_by_subpackage() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/gorilla/mux" = "v1.8.0"
+
+[replace.go]
+"golang.org/x/net" = { path = "../net" }
+"#,
+        );
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        assert!(check_go_replacements_allowing(&manifest, &["golang.org/x/net/http2"]).is_ok());
     }
 
     #[test]

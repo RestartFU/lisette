@@ -35,8 +35,8 @@ fn typedef_home() -> Option<PathBuf> {
 pub use project_manifest::{
     GoDependency, GoReplacement, Manifest, ResolveReport, TrimmedVia, check_go_replacements,
     check_go_replacements_allowing, check_no_subpackage_deps, check_toolchain_version,
-    parse_manifest, remove_go_dep, resolve_empty_via, trim_dead_via_parents, upsert_go_dep,
-    validate_project_name,
+    go_cache_version, parse_manifest, remove_go_dep, resolve_empty_via, trim_dead_via_parents,
+    upsert_go_dep, validate_project_name,
 };
 pub use typedef_locator::{
     Bindgen, BindgenFailure, BindgenGuard, BindgenSession, BindgenSetup, DeclarationStatus,

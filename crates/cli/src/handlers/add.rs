@@ -51,10 +51,11 @@ pub fn add(dep_string: &str) -> i32 {
         Err(code) => return code,
     };
 
-    let workspace = GoWorkspace::new(
+    let workspace = GoWorkspace::new_with_replacements(
         &project_ctx.target_dir,
         &project_ctx.typedef_cache_dir,
         Target::host(),
+        project_ctx.manifest.go_replacements(),
     );
 
     let mut module_graph = match reconcile_module_graph(&resolved_dep, &workspace) {

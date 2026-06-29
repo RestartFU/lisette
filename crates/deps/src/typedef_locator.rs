@@ -7,7 +7,7 @@ use stdlib::Target;
 
 use crate::project_manifest::{
     GoDependency, GoReplacement, Manifest, check_go_replacements, check_no_subpackage_deps,
-    check_toolchain_version, find_module_for_pkg, parse_manifest,
+    check_toolchain_version, find_module_for_pkg, go_cache_version, parse_manifest,
 };
 use crate::{GoModule, GoPackage, typedef_cache_dir};
 
@@ -152,10 +152,18 @@ impl TypedefLocator {
         check_no_subpackage_deps(&manifest)?;
         check_go_replacements(&manifest)?;
 
+        let project_root = project_root.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve project path `{}`: {}",
+                project_root.display(),
+                e
+            )
+        })?;
+
         let locator = Self::new_with_replacements(
             manifest.go_deps(),
             manifest.go_replacements(),
-            Some(project_root.to_path_buf()),
+            Some(project_root),
             Target::host(),
         );
 
@@ -223,14 +231,7 @@ impl TypedefLocator {
     }
 
     fn cache_version(&self, module_path: &str, dep: &GoDependency) -> String {
-        let Some(replacement) = self.replacements.get(module_path) else {
-            return dep.version.clone();
-        };
-        format!(
-            "{}+replace.{}",
-            dep.version,
-            sanitize_cache_segment(&replacement.cache_fingerprint())
-        )
+        go_cache_version(&dep.version, self.replacements.get(module_path))
     }
 
     /// Resolve a `go:` package: stdlib -> on-disk cache -> bindgen runner if set.
@@ -323,19 +324,6 @@ impl TypedefLocator {
             },
         }
     }
-}
-
-fn sanitize_cache_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 enum ReadOutcome {
