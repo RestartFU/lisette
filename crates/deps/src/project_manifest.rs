@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::hash::Hasher;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -45,9 +47,9 @@ pub struct GoReplacement {
 }
 
 impl GoReplacement {
-    pub fn cache_fingerprint(&self) -> String {
+    pub fn cache_fingerprint(&self, project_root: Option<&Path>) -> String {
         if let Some(path) = &self.path {
-            return format!("path:{}", path);
+            return path_replacement_fingerprint(path, project_root);
         }
         format!(
             "module:{}@{}",
@@ -235,15 +237,88 @@ pub fn check_go_replacements_allowing(
     Ok(())
 }
 
-pub fn go_cache_version(version: &str, replacement: Option<&GoReplacement>) -> String {
+pub fn go_cache_version(
+    version: &str,
+    replacement: Option<&GoReplacement>,
+    project_root: Option<&Path>,
+) -> String {
     let Some(replacement) = replacement else {
         return version.to_string();
     };
     format!(
         "{}+replace.{}",
         version,
-        sanitize_cache_segment(&replacement.cache_fingerprint())
+        sanitize_cache_segment(&replacement.cache_fingerprint(project_root))
     )
+}
+
+fn path_replacement_fingerprint(path: &str, project_root: Option<&Path>) -> String {
+    let resolved = resolve_replacement_path(path, project_root);
+    let display_path = resolved.display();
+    let go_mod_hash = fs::read(resolved.join("go.mod"))
+        .map(|bytes| stable_hash(&bytes))
+        .map(|hash| format!("{hash:016x}"))
+        .unwrap_or_else(|_| "missing".to_string());
+    let mtime = max_mtime_nanos(&resolved)
+        .map(|nanos| nanos.to_string())
+        .unwrap_or_else(|| "missing".to_string());
+
+    format!("path:{path}:resolved:{display_path}:go_mod:{go_mod_hash}:mtime:{mtime}")
+}
+
+fn resolve_replacement_path(path: &str, project_root: Option<&Path>) -> PathBuf {
+    let path = Path::new(path);
+    let resolved = if path.is_relative() {
+        project_root.map_or_else(|| path.to_path_buf(), |root| root.join(path))
+    } else {
+        path.to_path_buf()
+    };
+    resolved.canonicalize().unwrap_or(resolved)
+}
+
+fn max_mtime_nanos(path: &Path) -> Option<u128> {
+    let mut max = file_mtime_nanos(path);
+    if !path.is_dir() {
+        return max;
+    }
+
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, ".git" | "target"))
+            {
+                continue;
+            }
+            max = max.max(file_mtime_nanos(&path));
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    max
+}
+
+fn file_mtime_nanos(path: &Path) -> Option<u128> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    system_time_nanos(modified)
+}
+
+fn system_time_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_nanos())
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
 }
 
 fn sanitize_cache_segment(value: &str) -> String {
@@ -351,6 +426,12 @@ pub fn remove_go_dep(project_root: &Path, go_dep_path: &str) -> Result<(), Strin
         .get_mut("dependencies")
         .and_then(|d| d.as_table_mut())
         && let Some(go) = deps.get_mut("go").and_then(|g| g.as_table_mut())
+    {
+        go.remove(go_dep_path);
+    }
+
+    if let Some(replacements) = manifest.get_mut("replace").and_then(|d| d.as_table_mut())
+        && let Some(go) = replacements.get_mut("go").and_then(|g| g.as_table_mut())
     {
         go.remove(go_dep_path);
     }
@@ -679,8 +760,39 @@ version = "0.1.0"
         let mut replacements = manifest.go_replacements();
         let replacement = replacements.remove("github.com/df-mc/dragonfly").unwrap();
         assert_eq!(
-            replacement.cache_fingerprint(),
+            replacement.cache_fingerprint(Some(dir.path())),
             "module:github.com/ZenoMCPE/dragonfly@v0.10.14-0.20260629143000-431b9451656e"
+        );
+    }
+
+    #[test]
+    fn remove_go_dep_removes_matching_replacement() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/df-mc/dragonfly" = "v0.10.14"
+"github.com/gorilla/mux" = "v1.8.0"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { path = "../dragonfly" }
+"#,
+        );
+
+        remove_go_dep(dir.path(), "github.com/df-mc/dragonfly").unwrap();
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        assert!(
+            !manifest
+                .go_deps()
+                .contains_key("github.com/df-mc/dragonfly")
+        );
+        assert!(
+            !manifest
+                .go_replacements()
+                .contains_key("github.com/df-mc/dragonfly")
         );
     }
 

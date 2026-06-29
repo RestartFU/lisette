@@ -55,6 +55,7 @@ pub fn add(dep_string: &str) -> i32 {
         &project_ctx.target_dir,
         &project_ctx.typedef_cache_dir,
         Target::host(),
+        Some(project_ctx.project_root.clone()),
         project_ctx.manifest.go_replacements(),
     );
 

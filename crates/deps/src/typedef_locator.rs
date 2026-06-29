@@ -231,7 +231,11 @@ impl TypedefLocator {
     }
 
     fn cache_version(&self, module_path: &str, dep: &GoDependency) -> String {
-        go_cache_version(&dep.version, self.replacements.get(module_path))
+        go_cache_version(
+            &dep.version,
+            self.replacements.get(module_path),
+            self.project_root.as_deref(),
+        )
     }
 
     /// Resolve a `go:` package: stdlib -> on-disk cache -> bindgen runner if set.
