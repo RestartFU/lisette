@@ -195,6 +195,14 @@ pub fn check_go_replacements(manifest: &Manifest) -> Result<(), String> {
     check_go_replacements_allowing(manifest, &[])
 }
 
+pub fn check_go_replacement_specs(manifest: &Manifest) -> Result<(), String> {
+    for (module_path, replacement) in &manifest.replacements.go {
+        check_go_replacement_spec(module_path, replacement)?;
+    }
+
+    Ok(())
+}
+
 pub fn check_go_replacements_allowing(
     manifest: &Manifest,
     allowed_missing_deps: &[&str],
@@ -213,28 +221,28 @@ pub fn check_go_replacements_allowing(
             ));
         }
 
-        let has_path = replacement.path.is_some();
-        let has_module = replacement.module.is_some();
-        let has_version = replacement.version.is_some();
-
-        match (has_path, has_module, has_version) {
-            (true, false, false) | (false, true, true) => {}
-            (true, _, _) => {
-                return Err(format!(
-                    "`{}` in `[replace.go]` must use either `path` or `module` + `version`, not both",
-                    module_path
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "`{}` in `[replace.go]` must specify either `path` or both `module` and `version`",
-                    module_path
-                ));
-            }
-        }
+        check_go_replacement_spec(module_path, replacement)?;
     }
 
     Ok(())
+}
+
+fn check_go_replacement_spec(module_path: &str, replacement: &GoReplacement) -> Result<(), String> {
+    let has_path = replacement.path.is_some();
+    let has_module = replacement.module.is_some();
+    let has_version = replacement.version.is_some();
+
+    match (has_path, has_module, has_version) {
+        (true, false, false) | (false, true, true) => Ok(()),
+        (true, _, _) => Err(format!(
+            "`{}` in `[replace.go]` must use either `path` or `module` + `version`, not both",
+            module_path
+        )),
+        _ => Err(format!(
+            "`{}` in `[replace.go]` must specify either `path` or both `module` and `version`",
+            module_path
+        )),
+    }
 }
 
 pub fn go_replacement_cache_key(

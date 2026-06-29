@@ -64,6 +64,10 @@ pub fn add(dep_string: &str) -> i32 {
         Err(code) => return code,
     };
 
+    if let Err(code) = validate_replacements_against_graph(&project_ctx.manifest, &module_graph) {
+        return code;
+    }
+
     let bindgenned = match walk_typedef_cache(&resolved_dep, &workspace, &mut module_graph) {
         Ok(v) => v,
         Err(code) => return code,
@@ -409,9 +413,7 @@ fn setup_project(
         return Err(1);
     }
 
-    if let Err(msg) =
-        deps::check_go_replacements_allowing(&manifest, &[parsed_dep.requested_package.as_str()])
-    {
+    if let Err(msg) = deps::check_go_replacement_specs(&manifest) {
         cli_error!(
             "Invalid `lisette.toml`",
             msg,
@@ -517,6 +519,21 @@ fn setup_project(
     };
 
     Ok((ctx, resolved))
+}
+
+fn validate_replacements_against_graph(
+    manifest: &deps::Manifest,
+    graph: &super::reconciliation::GraphResult,
+) -> Result<(), i32> {
+    let allowed: Vec<&str> = graph.versions.keys().map(String::as_str).collect();
+    deps::check_go_replacements_allowing(manifest, &allowed).map_err(|msg| {
+        cli_error!(
+            "Invalid `lisette.toml`",
+            msg,
+            "Remove the orphaned replacement or add its dependency"
+        );
+        1
+    })
 }
 
 #[cfg(test)]

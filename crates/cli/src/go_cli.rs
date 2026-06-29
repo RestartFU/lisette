@@ -158,7 +158,7 @@ pub fn write_go_mod(dir: &Path, module_name: &str, locator: &TypedefLocator) -> 
             replacements.push(format!(
                 "\t{} => {}",
                 module_path,
-                replacement_path_for_go_mod(path, locator)
+                quote_go_mod_string(&replacement_path_for_go_mod(path, locator))
             ));
             continue;
         }
@@ -198,6 +198,24 @@ fn replacement_path_for_go_mod(path: &str, locator: &TypedefLocator) -> String {
         return path.to_string();
     };
     project_root.join(replacement).display().to_string()
+}
+
+fn quote_go_mod_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c if c.is_control() => quoted.push_str(&format!("\\u{:04x}", c as u32)),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 pub struct GoCliError {
@@ -706,6 +724,14 @@ mod tests {
         assert_eq!(sanitize_binary_stem("___"), "app");
         assert_eq!(sanitize_binary_stem("testdata"), "app");
         assert_eq!(sanitize_binary_stem("vendor"), "app");
+    }
+
+    #[test]
+    fn go_mod_string_quote_handles_local_paths() {
+        assert_eq!(
+            quote_go_mod_string(r#"/tmp/path with "quotes"\repo"#),
+            r#""/tmp/path with \"quotes\"\\repo""#
+        );
     }
 
     #[test]
