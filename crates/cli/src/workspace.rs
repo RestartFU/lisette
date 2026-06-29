@@ -291,6 +291,7 @@ impl<'a> GoWorkspace<'a> {
         self.go_get(GoModule {
             path: package,
             version: module.version,
+            cache_version: None,
         })?;
 
         let manifest = self.run_bindgen_batch(&[package.to_string()], BatchScope::RequestedOnly)?;
@@ -721,7 +722,9 @@ impl GoWorkspace<'_> {
         let mut written = 0;
 
         for entry in &manifest.ok {
-            let Some((module_path, version)) = locator.module_for_package(&entry.package) else {
+            let Some((module_path, version, cache_version)) =
+                locator.module_for_package(&entry.package)
+            else {
                 continue;
             };
             if validate_typedef_parses(&entry.package, &entry.content).is_err() {
@@ -732,6 +735,7 @@ impl GoWorkspace<'_> {
                 module: GoModule {
                     path: &module_path,
                     version: &version,
+                    cache_version: Some(&cache_version),
                 },
                 package: &entry.package,
             };
@@ -927,8 +931,12 @@ impl BindgenSetup for WorkspaceBindgenSetup {
 
         let lock = crate::lock::acquire_target_lock_quiet(&target_dir)?;
 
-        let manifest_locator =
-            deps::TypedefLocator::new(manifest.go_deps(), Some(project_root.to_path_buf()), target);
+        let manifest_locator = deps::TypedefLocator::new_with_replacements(
+            manifest.go_deps(),
+            manifest.go_replacements(),
+            Some(project_root.to_path_buf()),
+            target,
+        );
         crate::go_cli::write_go_mod(&target_dir, &manifest.project.name, &manifest_locator)?;
 
         let typedef_cache_dir = deps::typedef_cache_dir(project_root);
@@ -963,6 +971,7 @@ impl Bindgen for WorkspaceBindgen {
         let module = GoModule {
             path: pkg.module.path,
             version: pkg.module.version,
+            cache_version: pkg.module.cache_version,
         };
 
         match workspace.reconcile_package(module, pkg.package) {
@@ -999,6 +1008,7 @@ mod tests {
         GoModule {
             path: MODULE_PATH,
             version: MODULE_VERSION,
+            cache_version: None,
         }
     }
 

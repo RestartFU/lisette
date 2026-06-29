@@ -10,6 +10,8 @@ pub struct Manifest {
     pub project: Project,
     pub toolchain: Option<Toolchain>,
     pub dependencies: Option<Dependencies>,
+    #[serde(default, rename = "replace")]
+    pub replacements: Replacements,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -27,6 +29,32 @@ pub struct Toolchain {
 pub struct Dependencies {
     #[serde(default)]
     pub go: BTreeMap<String, GoDependency>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Replacements {
+    #[serde(default)]
+    pub go: BTreeMap<String, GoReplacement>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoReplacement {
+    pub path: Option<String>,
+    pub module: Option<String>,
+    pub version: Option<String>,
+}
+
+impl GoReplacement {
+    pub fn cache_fingerprint(&self) -> String {
+        if let Some(path) = &self.path {
+            return format!("path:{}", path);
+        }
+        format!(
+            "module:{}@{}",
+            self.module.as_deref().unwrap_or(""),
+            self.version.as_deref().unwrap_or("")
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +114,10 @@ impl Manifest {
             .as_ref()
             .map(|d| d.go.clone())
             .unwrap_or_default()
+    }
+
+    pub fn go_replacements(&self) -> BTreeMap<String, GoReplacement> {
+        self.replacements.go.clone()
     }
 }
 
@@ -152,6 +184,41 @@ pub fn check_no_subpackage_deps(manifest: &Manifest) -> Result<(), String> {
             "`{}` in `[dependencies.go]` is a subpackage of `{}`; remove this entry and rely on the parent module pin",
             key, parent
         ));
+    }
+
+    Ok(())
+}
+
+pub fn check_go_replacements(manifest: &Manifest) -> Result<(), String> {
+    let deps = manifest.go_deps();
+
+    for (module_path, replacement) in &manifest.replacements.go {
+        if !deps.contains_key(module_path) {
+            return Err(format!(
+                "`{}` in `[replace.go]` has no matching `[dependencies.go]` entry",
+                module_path
+            ));
+        }
+
+        let has_path = replacement.path.is_some();
+        let has_module = replacement.module.is_some();
+        let has_version = replacement.version.is_some();
+
+        match (has_path, has_module, has_version) {
+            (true, false, false) | (false, true, true) => {}
+            (true, _, _) => {
+                return Err(format!(
+                    "`{}` in `[replace.go]` must use either `path` or `module` + `version`, not both",
+                    module_path
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "`{}` in `[replace.go]` must specify either `path` or both `module` and `version`",
+                    module_path
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -555,6 +622,71 @@ version = "0.1.0"
         let error = check_no_subpackage_deps(&manifest).unwrap_err();
         assert!(error.contains("`github.com/gorilla/mux/middleware`"));
         assert!(error.contains("subpackage of `github.com/gorilla/mux`"));
+    }
+
+    #[test]
+    fn accepts_module_replacement_for_declared_dep() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/df-mc/dragonfly" = "v0.10.14"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { module = "github.com/ZenoMCPE/dragonfly", version = "v0.10.14-0.20260629143000-431b9451656e" }
+"#,
+        );
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        assert!(check_go_replacements(&manifest).is_ok());
+        let mut replacements = manifest.go_replacements();
+        let replacement = replacements.remove("github.com/df-mc/dragonfly").unwrap();
+        assert_eq!(
+            replacement.cache_fingerprint(),
+            "module:github.com/ZenoMCPE/dragonfly@v0.10.14-0.20260629143000-431b9451656e"
+        );
+    }
+
+    #[test]
+    fn rejects_replacement_without_declared_dep() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/gorilla/mux" = "v1.8.0"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { path = "../dragonfly" }
+"#,
+        );
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        let error = check_go_replacements(&manifest).unwrap_err();
+        assert!(error.contains("has no matching `[dependencies.go]` entry"));
+    }
+
+    #[test]
+    fn rejects_replacement_with_partial_module_target() {
+        let dir = project_with(
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+
+[dependencies.go]
+"github.com/df-mc/dragonfly" = "v0.10.14"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { module = "github.com/ZenoMCPE/dragonfly" }
+"#,
+        );
+        let manifest = parse_manifest(dir.path()).unwrap();
+
+        let error = check_go_replacements(&manifest).unwrap_err();
+        assert!(error.contains("must specify either `path` or both `module` and `version`"));
     }
 
     #[test]

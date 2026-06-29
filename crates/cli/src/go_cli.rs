@@ -152,6 +152,20 @@ pub fn write_go_mod(dir: &Path, module_name: &str, locator: &TypedefLocator) -> 
         }
     }
 
+    let mut replacements = Vec::new();
+    for (module_path, replacement) in locator.replacements() {
+        if let Some(path) = &replacement.path {
+            replacements.push(format!("\t{} => {}", module_path, path));
+            continue;
+        }
+        if let (Some(module), Some(version)) = (&replacement.module, &replacement.version) {
+            replacements.push(format!("\t{} => {} {}", module_path, module, version));
+        }
+    }
+    if !replacements.is_empty() {
+        content.push_str(&format!("\nreplace (\n{}\n)\n", replacements.join("\n")));
+    }
+
     let go_mod_path = dir.join("go.mod");
     let lisette_dir = dir.join(".lisette");
     let stamp_path = lisette_dir.join("go.mod.stamp");

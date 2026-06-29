@@ -366,6 +366,25 @@ Example output:
 "go.uber.org/multierr" = { version = "v1.10.0", via = ["go.uber.org/zap"] }
 ```
 
+To replace a Go module while keeping the original import path, add a
+`[replace.go]` entry. This is written to generated `target/go.mod` as a Go
+`replace` directive.
+
+```toml
+[dependencies.go]
+"github.com/df-mc/dragonfly" = "v0.10.14"
+
+[replace.go]
+"github.com/df-mc/dragonfly" = { module = "github.com/ZenoMCPE/dragonfly", version = "v0.10.14-0.20260629143000-431b9451656e" }
+```
+
+For local development:
+
+```toml
+[replace.go]
+"github.com/df-mc/dragonfly" = { path = "../dragonfly" }
+```
+
 To import a third-party dependency:
 
 ```rs

@@ -198,6 +198,7 @@ pub(crate) fn walk_typedef_cache(
         let module = GoModule {
             path: &module_path,
             version: &version,
+            cache_version: None,
         };
 
         match workspace.reconcile_package(module, &package_path) {
@@ -316,6 +317,7 @@ pub(crate) fn rebuild_drifted_cache_entries(
         let module = GoModule {
             path: &entry.module,
             version: current,
+            cache_version: None,
         };
         match workspace.reconcile_package(module, &entry.package) {
             Ok(stubs) => warn_stubbed(&stubs),

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use stdlib::Target;
 
 use crate::project_manifest::{
-    GoDependency, Manifest, check_no_subpackage_deps, check_toolchain_version, find_module_for_pkg,
-    parse_manifest,
+    GoDependency, GoReplacement, Manifest, check_go_replacements, check_no_subpackage_deps,
+    check_toolchain_version, find_module_for_pkg, parse_manifest,
 };
 use crate::{GoModule, GoPackage, typedef_cache_dir};
 
@@ -47,7 +47,11 @@ pub enum BindgenFailure {
 #[derive(Debug)]
 pub enum DeclarationStatus {
     Stdlib,
-    DeclaredThirdParty { module: String, version: String },
+    DeclaredThirdParty {
+        module: String,
+        version: String,
+        cache_version: String,
+    },
     UnknownStdlib,
     UndeclaredImport,
 }
@@ -106,6 +110,7 @@ pub trait BindgenSetup: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct TypedefLocator {
     deps: BTreeMap<String, GoDependency>,
+    replacements: BTreeMap<String, GoReplacement>,
     project_root: Option<PathBuf>,
     target: Target,
     bindgen: Option<Arc<dyn Bindgen>>,
@@ -117,8 +122,18 @@ impl TypedefLocator {
         project_root: Option<PathBuf>,
         target: Target,
     ) -> Self {
+        Self::new_with_replacements(deps, BTreeMap::new(), project_root, target)
+    }
+
+    pub fn new_with_replacements(
+        deps: BTreeMap<String, GoDependency>,
+        replacements: BTreeMap<String, GoReplacement>,
+        project_root: Option<PathBuf>,
+        target: Target,
+    ) -> Self {
         Self {
             deps,
+            replacements,
             project_root,
             target,
             bindgen: None,
@@ -135,9 +150,11 @@ impl TypedefLocator {
 
         check_toolchain_version(&manifest)?;
         check_no_subpackage_deps(&manifest)?;
+        check_go_replacements(&manifest)?;
 
-        let locator = Self::new(
+        let locator = Self::new_with_replacements(
             manifest.go_deps(),
+            manifest.go_replacements(),
             Some(project_root.to_path_buf()),
             Target::host(),
         );
@@ -158,6 +175,10 @@ impl TypedefLocator {
         &self.deps
     }
 
+    pub fn replacements(&self) -> &BTreeMap<String, GoReplacement> {
+        &self.replacements
+    }
+
     pub fn target(&self) -> Target {
         self.target
     }
@@ -168,9 +189,14 @@ impl TypedefLocator {
 
     /// Resolve a `go:` package path to its declared module path and version by
     /// longest declared prefix, or `None` if no declared module contains it.
-    pub fn module_for_package(&self, package_path: &str) -> Option<(String, String)> {
-        find_module_for_pkg(&self.deps, package_path)
-            .map(|(module, dep)| (module.to_string(), dep.version.clone()))
+    pub fn module_for_package(&self, package_path: &str) -> Option<(String, String, String)> {
+        find_module_for_pkg(&self.deps, package_path).map(|(module, dep)| {
+            (
+                module.to_string(),
+                dep.version.clone(),
+                self.cache_version(module, dep),
+            )
+        })
     }
 
     /// Classify a `go:` import path without touching the cache or bindgen.
@@ -190,14 +216,26 @@ impl TypedefLocator {
             Some((module_path, dep)) => DeclarationStatus::DeclaredThirdParty {
                 module: module_path.to_string(),
                 version: dep.version.clone(),
+                cache_version: self.cache_version(module_path, dep),
             },
             None => DeclarationStatus::UndeclaredImport,
         }
     }
 
+    fn cache_version(&self, module_path: &str, dep: &GoDependency) -> String {
+        let Some(replacement) = self.replacements.get(module_path) else {
+            return dep.version.clone();
+        };
+        format!(
+            "{}+replace.{}",
+            dep.version,
+            sanitize_cache_segment(&replacement.cache_fingerprint())
+        )
+    }
+
     /// Resolve a `go:` package: stdlib -> on-disk cache -> bindgen runner if set.
     pub fn find_typedef_content(&self, package_path: &str) -> TypedefLocatorResult {
-        let (module_path, version) = match self.classify(package_path) {
+        let (module_path, version, cache_version) = match self.classify(package_path) {
             DeclarationStatus::Stdlib => {
                 let source = stdlib::get_go_stdlib_typedef(package_path, self.target)
                     .expect("Stdlib classification implies an embedded typedef");
@@ -214,7 +252,11 @@ impl TypedefLocator {
             }
             DeclarationStatus::UnknownStdlib => return TypedefLocatorResult::UnknownStdlib,
             DeclarationStatus::UndeclaredImport => return TypedefLocatorResult::UndeclaredImport,
-            DeclarationStatus::DeclaredThirdParty { module, version } => (module, version),
+            DeclarationStatus::DeclaredThirdParty {
+                module,
+                version,
+                cache_version,
+            } => (module, version, cache_version),
         };
 
         let Some(project_root) = &self.project_root else {
@@ -228,6 +270,7 @@ impl TypedefLocator {
             module: GoModule {
                 path: &module_path,
                 version: &version,
+                cache_version: Some(&cache_version),
             },
             package: package_path,
         };
@@ -280,6 +323,19 @@ impl TypedefLocator {
             },
         }
     }
+}
+
+fn sanitize_cache_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 enum ReadOutcome {

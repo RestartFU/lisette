@@ -407,6 +407,15 @@ fn setup_project(
         return Err(1);
     }
 
+    if let Err(msg) = deps::check_go_replacements(&manifest) {
+        cli_error!(
+            "Invalid `lisette.toml`",
+            msg,
+            "Fix `lisette.toml` and retry"
+        );
+        return Err(1);
+    }
+
     if let Err(msg) = deps::validate_project_name(&manifest.project.name) {
         cli_error!(
             "Invalid project name",
@@ -438,8 +447,9 @@ fn setup_project(
     let mutation_lock = acquire_mutation_lock(&project_target_dir)?;
     let target_lock = acquire_target_lock(&project_target_dir)?;
 
-    let locator = deps::TypedefLocator::new(
+    let locator = deps::TypedefLocator::new_with_replacements(
         manifest.go_deps(),
+        manifest.go_replacements(),
         Some(project_root.clone()),
         Target::host(),
     );
@@ -462,6 +472,7 @@ fn setup_project(
     if let Err(msg) = workspace.go_get(GoModule {
         path: &parsed_dep.requested_package,
         version: &parsed_dep.version,
+        cache_version: None,
     }) {
         let enriched = enrich_with_parent_hint(&workspace, &parsed_dep.requested_package, msg);
         error!("failed to download dependency", enriched);
