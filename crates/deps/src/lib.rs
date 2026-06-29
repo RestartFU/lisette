@@ -33,9 +33,11 @@ fn typedef_home() -> Option<PathBuf> {
 }
 
 pub use project_manifest::{
-    GoDependency, Manifest, ResolveReport, TrimmedVia, check_no_subpackage_deps,
-    check_toolchain_version, parse_manifest, remove_go_dep, resolve_empty_via,
-    trim_dead_via_parents, upsert_go_dep, validate_project_name,
+    GoDependency, GoReplacement, Manifest, ResolveReport, TrimmedVia, check_go_replacement_specs,
+    check_go_replacements, check_go_replacements_allowing, check_no_subpackage_deps,
+    check_toolchain_version, go_cache_version, go_replacement_cache_key, parse_manifest,
+    remove_go_dep, resolve_empty_via, resolve_go_replacement_path, trim_dead_via_parents,
+    upsert_go_dep, validate_project_name,
 };
 pub use typedef_locator::{
     Bindgen, BindgenFailure, BindgenGuard, BindgenSession, BindgenSetup, DeclarationStatus,
@@ -255,6 +257,10 @@ pub struct GoModule<'a> {
     pub path: &'a str,
     /// Module version, e.g. `v1.8.0`.
     pub version: &'a str,
+    /// Cache key version. Usually identical to `version`, but may include a
+    /// replacement fingerprint so typedefs generated from `replace` sources do
+    /// not collide with upstream module typedefs.
+    pub cache_version: Option<&'a str>,
 }
 
 /// A Go package within a module.
@@ -274,9 +280,11 @@ impl GoPackage<'_> {
     /// <project>/target/.lisette/typedefs/lis@v0.1.6/darwin_arm64/github.com/gorilla/mux@v1.8.0/middleware/middleware.d.lis
     /// ```
     pub fn typedef_path(&self, base_dir: &Path, target: Target) -> PathBuf {
-        let module_dir = base_dir
-            .join(target.cache_segment())
-            .join(format!("{}@{}", self.module.path, self.module.version));
+        let module_dir = base_dir.join(target.cache_segment()).join(format!(
+            "{}@{}",
+            self.module.path,
+            self.module.cache_version.unwrap_or(self.module.version)
+        ));
 
         let relative = if self.package == self.module.path {
             ""

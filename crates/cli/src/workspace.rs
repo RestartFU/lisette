@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use deps::{
-    Bindgen, BindgenFailure, BindgenSession, BindgenSetup, GoModule, GoPackage, TypedefLocator,
+    Bindgen, BindgenFailure, BindgenSession, BindgenSetup, GoModule, GoPackage, GoReplacement,
+    TypedefLocator, go_replacement_cache_key,
 };
 use serde::Deserialize;
 use syntax::ast::{Expression, ImportAlias};
@@ -57,15 +58,46 @@ pub struct GoWorkspace<'a> {
     /// The typedef cache root, e.g. `<project>/target/.lisette/typedefs/lis@v0.1.7`.
     pub typedef_cache_dir: &'a Path,
     target: stdlib::Target,
+    replacement_cache_keys: BTreeMap<String, String>,
 }
 
 impl<'a> GoWorkspace<'a> {
     pub fn new(root: &'a Path, typedef_cache_dir: &'a Path, target: stdlib::Target) -> Self {
+        Self::new_with_replacements(root, typedef_cache_dir, target, None, BTreeMap::new())
+    }
+
+    pub fn new_with_replacements(
+        root: &'a Path,
+        typedef_cache_dir: &'a Path,
+        target: stdlib::Target,
+        project_root: Option<PathBuf>,
+        replacements: BTreeMap<String, GoReplacement>,
+    ) -> Self {
+        let replacement_cache_keys = replacements
+            .iter()
+            .map(|(module, replacement)| {
+                (
+                    module.clone(),
+                    go_replacement_cache_key(replacement, project_root.as_deref()),
+                )
+            })
+            .collect();
+
         Self {
             root,
             typedef_cache_dir,
             target,
+            replacement_cache_keys,
         }
+    }
+
+    pub fn cache_version_for(&self, module_path: &str, version: &str) -> String {
+        deps::go_cache_version(
+            version,
+            self.replacement_cache_keys
+                .get(module_path)
+                .map(String::as_str),
+        )
     }
 
     /// Run a `go` subcommand and return its stdout on success.
@@ -291,6 +323,7 @@ impl<'a> GoWorkspace<'a> {
         self.go_get(GoModule {
             path: package,
             version: module.version,
+            cache_version: None,
         })?;
 
         let manifest = self.run_bindgen_batch(&[package.to_string()], BatchScope::RequestedOnly)?;
@@ -721,7 +754,9 @@ impl GoWorkspace<'_> {
         let mut written = 0;
 
         for entry in &manifest.ok {
-            let Some((module_path, version)) = locator.module_for_package(&entry.package) else {
+            let Some((module_path, version, cache_version)) =
+                locator.module_for_package(&entry.package)
+            else {
                 continue;
             };
             if validate_typedef_parses(&entry.package, &entry.content).is_err() {
@@ -732,6 +767,7 @@ impl GoWorkspace<'_> {
                 module: GoModule {
                     path: &module_path,
                     version: &version,
+                    cache_version: Some(&cache_version),
                 },
                 package: &entry.package,
             };
@@ -927,8 +963,12 @@ impl BindgenSetup for WorkspaceBindgenSetup {
 
         let lock = crate::lock::acquire_target_lock_quiet(&target_dir)?;
 
-        let manifest_locator =
-            deps::TypedefLocator::new(manifest.go_deps(), Some(project_root.to_path_buf()), target);
+        let manifest_locator = deps::TypedefLocator::new_with_replacements(
+            manifest.go_deps(),
+            manifest.go_replacements(),
+            Some(project_root.to_path_buf()),
+            target,
+        );
         crate::go_cli::write_go_mod(&target_dir, &manifest.project.name, &manifest_locator)?;
 
         let typedef_cache_dir = deps::typedef_cache_dir(project_root);
@@ -963,6 +1003,7 @@ impl Bindgen for WorkspaceBindgen {
         let module = GoModule {
             path: pkg.module.path,
             version: pkg.module.version,
+            cache_version: pkg.module.cache_version,
         };
 
         match workspace.reconcile_package(module, pkg.package) {
@@ -999,6 +1040,7 @@ mod tests {
         GoModule {
             path: MODULE_PATH,
             version: MODULE_VERSION,
+            cache_version: None,
         }
     }
 

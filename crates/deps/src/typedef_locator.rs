@@ -2,11 +2,13 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use stdlib::Target;
 
 use crate::project_manifest::{
-    GoDependency, Manifest, check_no_subpackage_deps, check_toolchain_version, find_module_for_pkg,
+    GoDependency, GoReplacement, Manifest, check_go_replacements, check_no_subpackage_deps,
+    check_toolchain_version, find_module_for_pkg, go_cache_version, go_replacement_cache_key,
     parse_manifest,
 };
 use crate::{GoModule, GoPackage, typedef_cache_dir};
@@ -47,7 +49,11 @@ pub enum BindgenFailure {
 #[derive(Debug)]
 pub enum DeclarationStatus {
     Stdlib,
-    DeclaredThirdParty { module: String, version: String },
+    DeclaredThirdParty {
+        module: String,
+        version: String,
+        cache_version: String,
+    },
     UnknownStdlib,
     UndeclaredImport,
 }
@@ -106,6 +112,8 @@ pub trait BindgenSetup: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct TypedefLocator {
     deps: BTreeMap<String, GoDependency>,
+    replacements: BTreeMap<String, GoReplacement>,
+    replacement_cache_keys: BTreeMap<String, String>,
     project_root: Option<PathBuf>,
     target: Target,
     bindgen: Option<Arc<dyn Bindgen>>,
@@ -117,8 +125,29 @@ impl TypedefLocator {
         project_root: Option<PathBuf>,
         target: Target,
     ) -> Self {
+        Self::new_with_replacements(deps, BTreeMap::new(), project_root, target)
+    }
+
+    pub fn new_with_replacements(
+        deps: BTreeMap<String, GoDependency>,
+        replacements: BTreeMap<String, GoReplacement>,
+        project_root: Option<PathBuf>,
+        target: Target,
+    ) -> Self {
+        let replacement_cache_keys = replacements
+            .iter()
+            .map(|(module, replacement)| {
+                (
+                    module.clone(),
+                    go_replacement_cache_key(replacement, project_root.as_deref()),
+                )
+            })
+            .collect();
+
         Self {
             deps,
+            replacements,
+            replacement_cache_keys,
             project_root,
             target,
             bindgen: None,
@@ -135,10 +164,20 @@ impl TypedefLocator {
 
         check_toolchain_version(&manifest)?;
         check_no_subpackage_deps(&manifest)?;
+        check_go_replacements(&manifest)?;
 
-        let locator = Self::new(
+        let project_root = project_root.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve project path `{}`: {}",
+                project_root.display(),
+                e
+            )
+        })?;
+
+        let locator = Self::new_with_replacements(
             manifest.go_deps(),
-            Some(project_root.to_path_buf()),
+            manifest.go_replacements(),
+            Some(project_root),
             Target::host(),
         );
 
@@ -158,6 +197,10 @@ impl TypedefLocator {
         &self.deps
     }
 
+    pub fn replacements(&self) -> &BTreeMap<String, GoReplacement> {
+        &self.replacements
+    }
+
     pub fn target(&self) -> Target {
         self.target
     }
@@ -168,9 +211,14 @@ impl TypedefLocator {
 
     /// Resolve a `go:` package path to its declared module path and version by
     /// longest declared prefix, or `None` if no declared module contains it.
-    pub fn module_for_package(&self, package_path: &str) -> Option<(String, String)> {
-        find_module_for_pkg(&self.deps, package_path)
-            .map(|(module, dep)| (module.to_string(), dep.version.clone()))
+    pub fn module_for_package(&self, package_path: &str) -> Option<(String, String, String)> {
+        find_module_for_pkg(&self.deps, package_path).map(|(module, dep)| {
+            (
+                module.to_string(),
+                dep.version.clone(),
+                self.cache_version(module, dep),
+            )
+        })
     }
 
     /// Classify a `go:` import path without touching the cache or bindgen.
@@ -190,14 +238,24 @@ impl TypedefLocator {
             Some((module_path, dep)) => DeclarationStatus::DeclaredThirdParty {
                 module: module_path.to_string(),
                 version: dep.version.clone(),
+                cache_version: self.cache_version(module_path, dep),
             },
             None => DeclarationStatus::UndeclaredImport,
         }
     }
 
+    fn cache_version(&self, module_path: &str, dep: &GoDependency) -> String {
+        go_cache_version(
+            &dep.version,
+            self.replacement_cache_keys
+                .get(module_path)
+                .map(String::as_str),
+        )
+    }
+
     /// Resolve a `go:` package: stdlib -> on-disk cache -> bindgen runner if set.
     pub fn find_typedef_content(&self, package_path: &str) -> TypedefLocatorResult {
-        let (module_path, version) = match self.classify(package_path) {
+        let (module_path, version, cache_version) = match self.classify(package_path) {
             DeclarationStatus::Stdlib => {
                 let source = stdlib::get_go_stdlib_typedef(package_path, self.target)
                     .expect("Stdlib classification implies an embedded typedef");
@@ -214,7 +272,11 @@ impl TypedefLocator {
             }
             DeclarationStatus::UnknownStdlib => return TypedefLocatorResult::UnknownStdlib,
             DeclarationStatus::UndeclaredImport => return TypedefLocatorResult::UndeclaredImport,
-            DeclarationStatus::DeclaredThirdParty { module, version } => (module, version),
+            DeclarationStatus::DeclaredThirdParty {
+                module,
+                version,
+                cache_version,
+            } => (module, version, cache_version),
         };
 
         let Some(project_root) = &self.project_root else {
@@ -228,13 +290,21 @@ impl TypedefLocator {
             module: GoModule {
                 path: &module_path,
                 version: &version,
+                cache_version: Some(&cache_version),
             },
             package: package_path,
         };
         let cache_dir = typedef_cache_dir(project_root);
         let typedef_path = pkg.typedef_path(&cache_dir, self.target);
 
-        match read_typedef(&typedef_path) {
+        let read_outcome =
+            if self.local_replacement_typedef_stale(&module_path, package_path, &typedef_path) {
+                ReadOutcome::Missing
+            } else {
+                read_typedef(&typedef_path)
+            };
+
+        match read_outcome {
             ReadOutcome::Found(content) => TypedefLocatorResult::Found {
                 content: Cow::Owned(content),
                 origin: TypedefOrigin::Cache(typedef_path),
@@ -280,6 +350,59 @@ impl TypedefLocator {
             },
         }
     }
+
+    fn local_replacement_typedef_stale(
+        &self,
+        module_path: &str,
+        package_path: &str,
+        typedef_path: &Path,
+    ) -> bool {
+        let Some(replacement) = self.replacements.get(module_path) else {
+            return false;
+        };
+        let Some(path) = &replacement.path else {
+            return false;
+        };
+        let Some(package_rel) = package_path
+            .strip_prefix(module_path)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        else {
+            return false;
+        };
+
+        let root = crate::resolve_go_replacement_path(path, self.project_root.as_deref());
+        let package_dir = root.join(package_rel.trim_start_matches('/'));
+        let Some(package_mtime) = go_package_mtime_nanos(&package_dir) else {
+            return false;
+        };
+        let Some(typedef_mtime) = file_mtime_nanos(typedef_path) else {
+            return true;
+        };
+
+        package_mtime > typedef_mtime
+    }
+}
+
+fn go_package_mtime_nanos(package_dir: &Path) -> Option<u128> {
+    let entries = std::fs::read_dir(package_dir).ok()?;
+    let mut max = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("go") {
+            continue;
+        }
+        max = max.max(file_mtime_nanos(&path));
+    }
+    max
+}
+
+fn file_mtime_nanos(path: &Path) -> Option<u128> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_nanos(modified)
+}
+
+fn system_time_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_nanos())
 }
 
 enum ReadOutcome {

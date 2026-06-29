@@ -51,16 +51,22 @@ pub fn add(dep_string: &str) -> i32 {
         Err(code) => return code,
     };
 
-    let workspace = GoWorkspace::new(
+    let workspace = GoWorkspace::new_with_replacements(
         &project_ctx.target_dir,
         &project_ctx.typedef_cache_dir,
         Target::host(),
+        Some(project_ctx.project_root.clone()),
+        project_ctx.manifest.go_replacements(),
     );
 
     let mut module_graph = match reconcile_module_graph(&resolved_dep, &workspace) {
         Ok(v) => v,
         Err(code) => return code,
     };
+
+    if let Err(code) = validate_replacements_against_graph(&project_ctx.manifest, &module_graph) {
+        return code;
+    }
 
     let bindgenned = match walk_typedef_cache(&resolved_dep, &workspace, &mut module_graph) {
         Ok(v) => v,
@@ -407,6 +413,15 @@ fn setup_project(
         return Err(1);
     }
 
+    if let Err(msg) = deps::check_go_replacement_specs(&manifest) {
+        cli_error!(
+            "Invalid `lisette.toml`",
+            msg,
+            "Fix `lisette.toml` and retry"
+        );
+        return Err(1);
+    }
+
     if let Err(msg) = deps::validate_project_name(&manifest.project.name) {
         cli_error!(
             "Invalid project name",
@@ -438,8 +453,9 @@ fn setup_project(
     let mutation_lock = acquire_mutation_lock(&project_target_dir)?;
     let target_lock = acquire_target_lock(&project_target_dir)?;
 
-    let locator = deps::TypedefLocator::new(
+    let locator = deps::TypedefLocator::new_with_replacements(
         manifest.go_deps(),
+        manifest.go_replacements(),
         Some(project_root.clone()),
         Target::host(),
     );
@@ -462,6 +478,7 @@ fn setup_project(
     if let Err(msg) = workspace.go_get(GoModule {
         path: &parsed_dep.requested_package,
         version: &parsed_dep.version,
+        cache_version: None,
     }) {
         let enriched = enrich_with_parent_hint(&workspace, &parsed_dep.requested_package, msg);
         error!("failed to download dependency", enriched);
@@ -502,6 +519,21 @@ fn setup_project(
     };
 
     Ok((ctx, resolved))
+}
+
+fn validate_replacements_against_graph(
+    manifest: &deps::Manifest,
+    graph: &super::reconciliation::GraphResult,
+) -> Result<(), i32> {
+    let allowed: Vec<&str> = graph.versions.keys().map(String::as_str).collect();
+    deps::check_go_replacements_allowing(manifest, &allowed).map_err(|msg| {
+        cli_error!(
+            "Invalid `lisette.toml`",
+            msg,
+            "Remove the orphaned replacement or add its dependency"
+        );
+        1
+    })
 }
 
 #[cfg(test)]

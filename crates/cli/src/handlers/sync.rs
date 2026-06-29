@@ -50,6 +50,15 @@ pub fn sync() -> i32 {
         return 1;
     }
 
+    if let Err(msg) = deps::check_go_replacements(&manifest) {
+        cli_error!(
+            "Invalid `lisette.toml`",
+            msg,
+            "Fix `lisette.toml` and retry"
+        );
+        return 1;
+    }
+
     if let Err(msg) = deps::validate_project_name(&manifest.project.name) {
         cli_error!(
             "Invalid project name",
@@ -108,8 +117,12 @@ pub fn sync() -> i32 {
     let prewarm_result = if !scanned.non_blank.is_empty() {
         let target = Target::host();
 
-        let locator =
-            deps::TypedefLocator::new(manifest.go_deps(), Some(project_root.clone()), target);
+        let locator = deps::TypedefLocator::new_with_replacements(
+            manifest.go_deps(),
+            manifest.go_replacements(),
+            Some(project_root.clone()),
+            target,
+        );
         if let Err(msg) = go_cli::write_go_mod(&target_dir, &manifest.project.name, &locator) {
             error!("failed to write target/go.mod", msg);
             return 1;
